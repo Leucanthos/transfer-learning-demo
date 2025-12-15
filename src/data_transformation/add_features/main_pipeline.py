@@ -85,7 +85,7 @@ def add_features_pipeline(
     df_train["day_gap"]=df_train["visit_date"].apply(lambda x:date_gap(x,t_begin))
     air_reserve["day_gap"] = air_reserve["reserve_date"].apply(lambda x: date_gap(x, t_begin))
 
-    df_label=df_label[["air_store_id","visit_date","day_gap"]].copy()
+    df_label=df_label[["air_store_id","visit_date","day_gap","visitors"]].copy()
     test=create_features(df_label,df_train,air_reserve,air_info,df_date_info,PrEp)
 
     return train,test
