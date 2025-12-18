@@ -1,3 +1,68 @@
+# Transfer Learning Demo
+
+本项目旨在演示如何在表格数据上应用各种迁移学习技术，特别关注从AIR平台到HPG平台的客流预测任务。
+
+## 项目结构
+
+```
+.
+├── data/                          # 原始数据目录
+│   └── outputs/                   # 处理后的特征数据
+├── lgbm_weights/                  # 预训练模型权重
+├── src/                           # 数据处理模块
+│   ├── data_transformation/       # 数据转换模块
+│   │   ├── add_features/          # 特征工程模块
+│   │   ├── data_cleansing.py      # 数据清洗
+│   │   └── load_data.py           # 数据加载
+│   └── __init__.py
+├── transfer_learning/             # 迁移学习核心算法模块
+│   ├── base.py                    # 基础模型类
+│   ├── baseline.py                # 基线方法
+│   ├── transfer.py                # 基础迁移学习方法
+│   ├── ensemble_transfer.py       # 集成迁移学习方法
+│   ├── advanced_transfer.py       # 高级迁移学习方法
+│   ├── super_ensemble.py          # 超级集成迁移学习方法
+│   └── __init__.py
+├── experiments/                   # 实验脚本和可视化
+│   ├── run_all_experiments_with_visualization.py  # 运行所有实验并可视化
+│   ├── run_failed_experiments_only.py             # 仅运行失败的实验
+│   ├── run_finetune_experiments.py               # 运行微调实验
+│   └── __init__.py
+├── RUN ME.ipynb                   # 快速入门Jupyter Notebook
+└── requirements.txt               # 项目依赖
+```
+
+## 迁移学习方法
+
+1. **伪标签迁移学习** - 使用源域模型为目标域数据生成伪标签
+2. **微调迁移学习** - 加载预训练模型并在目标域上进行微调
+3. **对抗域适应** - 通过对抗训练减少源域和目标域之间的差异
+4. **超级集成方法** - 结合多种技术的综合迁移方法
+
+## 快速开始
+
+1. 安装依赖:
+   ```
+   pip install -r requirements.txt
+   ```
+
+2. 运行数据处理脚本:
+   ```
+   python main.py
+   ```
+
+3. 运行迁移学习实验:
+   ```
+   python experiments/run_all_experiments_with_visualization.py
+   ```
+
+## 可视化
+
+运行实验脚本后，将在项目根目录生成多种可视化图表:
+- 预测值与实际值对比图
+- 特征重要性图
+- 方法性能对比图
+
 # Transfer Learning Demo for Restaurant Visitor Forecasting
 
 ## 项目背景
