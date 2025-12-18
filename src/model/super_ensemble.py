@@ -1,4 +1,5 @@
 import pickle
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 import numpy as np
@@ -8,6 +9,10 @@ from sklearn.cluster import KMeans
 
 from .base import ModelBase
 
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def _load_booster(model_path: str) -> lgb.Booster:
     """Load a pickled LightGBM Booster."""
@@ -62,18 +67,18 @@ def smart_sample_selection(source_data: pd.DataFrame,
     return useful_samples
 
 
-def adaptive_feature_alignment(source_df: pd.DataFrame, 
-                              target_df: pd.DataFrame, 
-                              feature_cols: list, 
-                              similarity_threshold: float = 0.7) -> pd.DataFrame:
+def partial_feature_alignment(source_df: pd.DataFrame, 
+                           target_df: pd.DataFrame, 
+                           feature_cols: list, 
+                           top_ratio: float = 0.1) -> pd.DataFrame:
     """
-    自适应特征对齐方法，只对相似的特征进行对齐
+    Partial CORAL方法，选择最相关的特征进行对齐（Top特征）
     
     参数:
     source_df: 源域数据
     target_df: 目标域数据
     feature_cols: 特征列名列表
-    similarity_threshold: 相似度阈值
+    top_ratio: 选择特征的比例
     
     返回:
     对齐后的源域数据
@@ -89,11 +94,12 @@ def adaptive_feature_alignment(source_df: pd.DataFrame,
         similarity = 1 - abs(src_corr - tgt_corr)
         feature_similarities.append(similarity)
     
-    # 选择相似度高的特征进行对齐
-    high_similarity_features = [feature_cols[i] for i, sim in enumerate(feature_similarities) if sim > similarity_threshold]
+    # 选择最相似的特征进行对齐
+    num_top_features = int(len(feature_cols) * top_ratio)
+    top_indices = np.argsort(feature_similarities)[-num_top_features:]
+    high_similarity_features = [feature_cols[i] for i in top_indices]
     
-    if len(high_similarity_features) == 0:
-        return src
+    logger.info(f"Selected top {len(high_similarity_features)} features for alignment")
     
     # 提取高相似度特征
     src_feat = src[high_similarity_features].to_numpy(dtype=float)
@@ -124,6 +130,56 @@ def adaptive_feature_alignment(source_df: pd.DataFrame,
     return src
 
 
+def evaluate_stage_loss(model_base, train_data, test_data, x_cols, y_cols, weight_col, valid_days, stage_name, init_model=None):
+    """
+    评估特定阶段的损失
+    
+    参数:
+    model_base: 模型基类实例
+    train_data: 训练数据
+    test_data: 测试数据
+    x_cols: 特征列
+    y_cols: 标签列
+    weight_col: 权重列
+    valid_days: 验证天数
+    stage_name: 阶段名称
+    init_model: 初始化模型
+    
+    返回:
+    该阶段的RMSLE分数
+    """
+    logger.info(f"Evaluating loss at {stage_name}...")
+    
+    # 准备数据
+    train_matrix, valid_matrix, te_x, te_y = model_base.prepare_lgbm_dataset_with_weights(
+        train_data=train_data,
+        test_data=test_data,
+        x_cols=x_cols,
+        y_cols=y_cols,
+        weight_col=weight_col,
+        valid_days=valid_days,
+    )
+    
+    # 训练模型
+    model = model_base.train_or_load_lgbm(
+        train_matrix,
+        valid_matrix,
+        None,  # 不保存中间模型
+        learning_rate=0.01,
+        num_round=500,
+        num_threads=4,
+        seed=2018,
+        early_stopping_rounds=100,
+        init_model=init_model,
+    )
+    
+    # 评估模型
+    results = model_base.evaluate_model(model, te_x, te_y)
+    logger.info(f"{stage_name} RMSLE: {results['rmsle']:.4f}")
+    
+    return results['rmsle']
+
+
 def super_ensemble_transfer_learning(
     source_data: pd.DataFrame,
     target_data: pd.DataFrame,
@@ -147,7 +203,7 @@ def super_ensemble_transfer_learning(
     
     这是一个单一模型的迁移学习方法，结合了多种技术：
     1. 智能样本筛选 - 选择源域中与目标域最相关的样本
-    2. 自适应特征对齐 - 只对相关特征进行对齐
+    2. Partial特征对齐 - 选择最相关的特征进行对齐
     3. 两阶段训练策略 - 先快速收敛，再精细调优
     
     参数:
@@ -186,20 +242,37 @@ def super_ensemble_transfer_learning(
     # 加载源模型
     source_model = _load_booster(source_model_path)
     
+    # 评估初始模型在目标域上的性能
+    initial_rmsle = evaluate_stage_loss(model_base, target_data, test_data, x_cols, y_cols, weight_col, valid_days, "Initial Target-only Model")
+    
     # 第一阶段：智能样本筛选
-    print("Stage 1: Smart sample selection...")
+    logger.info("Stage 1: Smart sample selection...")
     selected_source_data = smart_sample_selection(source_data, target_data, x_cols, n_clusters=20, selection_ratio=0.7)
     
-    # 第二阶段：自适应特征对齐
-    print("Stage 2: Adaptive feature alignment...")
-    aligned_source_data = adaptive_feature_alignment(selected_source_data, target_data, x_cols)
+    # 评估智能样本筛选后对目标域的影响
+    selected_train_data = pd.concat([target_data, selected_source_data], ignore_index=True)
+    sample_selection_rmsle = evaluate_stage_loss(model_base, selected_train_data, test_data, x_cols, y_cols, weight_col, valid_days, "After Sample Selection", source_model)
+    
+    # 第二阶段：Partial特征对齐
+    logger.info("Stage 2: Partial feature alignment...")
+    aligned_source_data = partial_feature_alignment(selected_source_data, target_data, x_cols, top_ratio=0.1)
+    
+    # 评估特征对齐后对目标域的影响
+    aligned_train_data = pd.concat([target_data, aligned_source_data], ignore_index=True)
+    feature_alignment_rmsle = evaluate_stage_loss(model_base, aligned_train_data, test_data, x_cols, y_cols, weight_col, valid_days, "After Feature Alignment", source_model)
     
     # 第三阶段：数据增强
-    print("Stage 3: Data augmentation...")
+    logger.info("Stage 3: Data augmentation...")
     enhanced_train_data = pd.concat([target_data, aligned_source_data], ignore_index=True)
     
+    # 评估数据增强后对目标域的影响
+    data_augmentation_rmsle = evaluate_stage_loss(model_base, enhanced_train_data, test_data, x_cols, y_cols, weight_col, valid_days, "After Data Augmentation", source_model)
+    
+    # 第四阶段：两阶段训练
+    logger.info(f"Stage 4: Two-phase training on {device.upper()}...")
+    
     # 重新准备增强后的训练数据
-    enhanced_train_matrix, _, _, _ = model_base.prepare_lgbm_dataset_with_weights(
+    enhanced_train_matrix, enhanced_valid_matrix, _, _ = model_base.prepare_lgbm_dataset_with_weights(
         train_data=enhanced_train_data,
         test_data=test_data,
         x_cols=x_cols,
@@ -208,14 +281,11 @@ def super_ensemble_transfer_learning(
         valid_days=valid_days,
     )
     
-    # 第四阶段：两阶段训练
-    print(f"Stage 4: Two-phase training on {device.upper()}...")
-    
     # 第一阶段：使用较高的学习率快速收敛
-    print(f"Phase 1: Fast convergence (lr={learning_rate_phase1}, rounds={num_round_phase1})")
+    logger.info(f"Phase 1: Fast convergence (lr={learning_rate_phase1}, rounds={num_round_phase1})")
     fast_model = model_base.train_or_load_lgbm(
         enhanced_train_matrix,
-        valid_matrix,
+        enhanced_valid_matrix,
         None,  # 不保存中间模型
         learning_rate=learning_rate_phase1,
         num_round=num_round_phase1,
@@ -225,11 +295,15 @@ def super_ensemble_transfer_learning(
         init_model=source_model,
     )
     
+    # 评估第一阶段训练后对目标域的影响
+    phase1_rmsle = model_base.evaluate_model(fast_model, te_x, te_y)['rmsle']
+    logger.info(f"After Phase 1 Training RMSLE: {phase1_rmsle:.4f}")
+    
     # 第二阶段：使用较低的学习率精细调优
-    print(f"Phase 2: Fine-tuning (lr={learning_rate_phase2}, rounds={num_round_phase2})")
+    logger.info(f"Phase 2: Fine-tuning (lr={learning_rate_phase2}, rounds={num_round_phase2})")
     super_ensemble_model = model_base.train_or_load_lgbm(
         enhanced_train_matrix,
-        valid_matrix,
+        enhanced_valid_matrix,
         super_ensemble_model_path,
         learning_rate=learning_rate_phase2,
         num_round=num_round_phase2,
@@ -239,4 +313,20 @@ def super_ensemble_transfer_learning(
         init_model=fast_model,
     )
 
-    return model_base.evaluate_model(super_ensemble_model, te_x, te_y)
+    final_results = model_base.evaluate_model(super_ensemble_model, te_x, te_y)
+    
+    # 记录各阶段的提升效果
+    logger.info("=" * 50)
+    logger.info("STEP-BY-STEP IMPROVEMENT SUMMARY")
+    logger.info("=" * 50)
+    logger.info(f"Initial Target-only Model:                 {initial_rmsle:.4f}")
+    logger.info(f"After Sample Selection:                   {sample_selection_rmsle:.4f} ({initial_rmsle - sample_selection_rmsle:+.4f})")
+    logger.info(f"After Feature Alignment:                 {feature_alignment_rmsle:.4f} ({sample_selection_rmsle - feature_alignment_rmsle:+.4f})")
+    logger.info(f"After Data Augmentation:                 {data_augmentation_rmsle:.4f} ({feature_alignment_rmsle - data_augmentation_rmsle:+.4f})")
+    logger.info(f"After Phase 1 Training:                  {phase1_rmsle:.4f} ({data_augmentation_rmsle - phase1_rmsle:+.4f})")
+    logger.info(f"Final Super Ensemble Model:               {final_results['rmsle']:.4f} ({phase1_rmsle - final_results['rmsle']:+.4f})")
+    logger.info("=" * 50)
+    logger.info("Total Improvement:                        {:.4f}".format(initial_rmsle - final_results['rmsle']))
+    logger.info("=" * 50)
+    
+    return final_results
