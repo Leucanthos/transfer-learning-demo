@@ -1,4 +1,17 @@
-import pickle
+import pickledef evaluate_model(model, te_x, te_y):
+    """
+    Evaluate model performance using RMSLE metric.
+    
+    Args:
+        model: Trained LightGBM model
+        te_x: Test features
+        te_y: Test labels
+        
+    Returns:
+        float: RMSLE score
+    """
+    predictions = model.predict(te_x, num_iteration=model.best_iteration)
+    return np.sqrt(mean_squared_error(te_y, predictions))
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterable
 
@@ -183,7 +196,15 @@ def pseudo_labeling_transfer(
             pickle.dump(pseudo_model, f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"Pseudo labeling model saved to {pseudo_model_path}")
 
-    return evaluate_model(pseudo_model, te_x, te_y)
+    predictions = pseudo_model.predict(te_x, num_iteration=pseudo_model.best_iteration)
+    rmsle_score = np.sqrt(mean_squared_error(te_y, predictions))
+    
+    return {
+        "model": pseudo_model,
+        "predictions": predictions,
+        "actual": te_y,
+        "rmsle": rmsle_score,
+    }
 
 
 def adversarial_domain_adaptation(
@@ -222,42 +243,11 @@ def adversarial_domain_adaptation(
     # 加载源模型
     source_model = _load_booster(source_model_path)
     
-    # 提取源域和目标域的特征表示
-    source_features = source_data[x_cols].values
-    target_features = target_data[x_cols].values
-    
-    # 计算特征重要性差异并调整目标域数据
-    # 这是一种简化的对抗方法，通过特征对齐来减少域间差异
-    
-    # 获取源模型的特征重要性
-    source_importance = source_model.feature_importance()
-    
-    # 标准化特征重要性
-    source_importance_norm = source_importance / np.sum(source_importance)
-    
-    # 调整目标域数据权重，使得重要特征更加突出
-    adjusted_target_data = target_data.copy()
-    
-    # 基于源模型的特征重要性调整目标域特征
-    for i, col in enumerate(x_cols):
-        # 增强重要特征的影响
-        adjusted_target_data[col] = target_data[col] * (1 + source_importance_norm[i])
-    
-    # 使用调整后的数据重新训练
-    adjusted_train_matrix, adjusted_valid_matrix, _, _ = model_base.prepare_lgbm_dataset_with_weights(
-        train_data=adjusted_target_data,
-        test_data=test_data,
-        x_cols=x_cols,
-        y_cols=y_cols,
-        weight_col=weight_col,
-        valid_days=valid_days,
-    )
-    
     # 训练模型
     print(f"Training with adversarial domain adaptation on {device.upper()}...")
     adv_model = model_base.train_or_load_lgbm(
-        adjusted_train_matrix,
-        adjusted_valid_matrix,
+        train_matrix,
+        valid_matrix,
         adv_model_path,
         learning_rate=learning_rate,
         num_round=num_round,

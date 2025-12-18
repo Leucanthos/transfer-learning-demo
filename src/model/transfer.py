@@ -60,44 +60,53 @@ def pseudo_label_transfer_learning(
     model_base = ModelBase(device=device)
     
     # 加载源模型
+    model_base = ModelBase(device=device)
+    
+    # Prepare datasets
+    tr_x, tr_y = target_data[x_cols], target_data[y_cols].values.ravel()
+    te_x, te_y = test_data[x_cols], test_data[y_cols].values.ravel()
+    
+    # Generate pseudo labels for target data using source model
     source_model = _load_booster(source_model_path)
+    pseudo_labels = source_model.predict(tr_x)
     
-    # 为目标域数据生成伪标签
-    target_features = target_data[x_cols]
-    pseudo_labels = source_model.predict(target_features)
+    # Combine source data with pseudo-labeled target data
+    # Note: We're assuming x_cols and y_cols are consistent between source and target
+    combined_x = pd.concat([source_data[x_cols], tr_x], ignore_index=True)
+    combined_y = np.concatenate([source_data[y_cols].values.ravel(), pseudo_labels])
     
-    # 创建带伪标签的目标域数据
-    pseudo_target_data = target_data.copy()
-    pseudo_target_data['visitors'] = pseudo_labels
+    # Apply weights based on recency (more recent = higher weight)
+    tr_weight = 1 / (1 + np.abs(target_data[weight_col]))
+    pseudo_weight = np.ones(len(source_data))  # Equal weight for source data
     
-    # 合并源域数据和带伪标签的目标域数据
-    combined_train_data = pd.concat([source_data, pseudo_target_data], ignore_index=True)
+    # Normalize weights
+    tr_weight = tr_weight / tr_weight.mean()
+    pseudo_weight = pseudo_weight / pseudo_weight.mean()
+    combined_weight = np.concatenate([pseudo_weight, tr_weight])
     
-    # 准备训练数据
-    train_matrix, valid_matrix, te_x, te_y = model_base.prepare_lgbm_dataset_with_weights(
-        train_data=combined_train_data,
-        test_data=test_data,
-        x_cols=x_cols,
-        y_cols=y_cols,
-        weight_col=weight_col,
-        valid_days=valid_days,
-    )
+    # Create datasets
+    train_matrix = lgb.Dataset(combined_x, combined_y, weight=combined_weight, free_raw_data=False)
+    valid_matrix = lgb.Dataset(te_x, te_y, free_raw_data=False)
     
-    # 训练模型
-    pseudo_model = model_base.train_or_load_lgbm(
+    # Train model
+    model = model_base.train_or_load_lgbm(
         train_matrix,
         valid_matrix,
         pseudo_model_path,
-        learning_rate=0.01,
-        num_round=3000,
         num_threads=4,
         seed=seed,
-        early_stopping_rounds=100,
     )
-
-    # 评估模型
-    results = model_base.evaluate_model(pseudo_model, te_x, te_y)
-    return results
+    
+    # Evaluate
+    predictions = model.predict(te_x, num_iteration=model.best_iteration)
+    rmsle_score = np.sqrt(mean_squared_error(te_y, predictions))
+    
+    return {
+        "model": model,
+        "predictions": predictions,
+        "actual": te_y,
+        "rmsle": rmsle_score,
+    }
 
 
 def fine_tune_transfer_learning(
@@ -142,7 +151,7 @@ def fine_tune_transfer_learning(
     """
     model_base = ModelBase(device=device)
     
-    # 准备目标域数据
+    # Prepare datasets
     train_matrix, valid_matrix, te_x, te_y = model_base.prepare_lgbm_dataset_with_weights(
         train_data=target_data,
         test_data=test_data,
@@ -152,25 +161,32 @@ def fine_tune_transfer_learning(
         valid_days=valid_days,
     )
     
-    # 加载源模型作为初始化模型
+    # Load source model for initialization
     source_model = _load_booster(source_model_path)
     
-    # 在目标域上微调模型
-    fine_tuned_model = model_base.train_or_load_lgbm(
+    # Fine-tune model on target data
+    model = model_base.train_or_load_lgbm(
         train_matrix,
         valid_matrix,
-        fine_tuned_model_path,
-        learning_rate=learning_rate,
+        None,  # Don't save intermediate models
+        learning_rate=fine_tune_lr,
         num_round=num_round,
-        num_threads=num_threads,
+        num_threads=4,
         seed=seed,
-        early_stopping_rounds=100,
-        init_model=source_model,  # 使用源模型作为初始化
+        early_stopping_rounds=300,
+        init_model=source_model,
     )
-
-    # 评估模型
-    results = model_base.evaluate_model(fine_tuned_model, te_x, te_y)
-    return results
+    
+    # Evaluate
+    predictions = model.predict(te_x, num_iteration=model.best_iteration)
+    rmsle_score = np.sqrt(mean_squared_error(te_y, predictions))
+    
+    return {
+        "model": model,
+        "predictions": predictions,
+        "actual": te_y,
+        "rmsle": rmsle_score,
+    }
 
 
 def direct_transfer_with_sample_selection(
